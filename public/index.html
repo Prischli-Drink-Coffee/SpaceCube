@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Soliton 3D Visualization</title>
+    <style>
+        body { margin: 0; overflow: hidden; }
+        canvas { display: block; }
+    </style>
+</head>
+<body>
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://cdn.jsdelivr.net/npm/three@0.173.0/build/three.module.js",
+                "three/examples/jsm/postprocessing/EffectComposer.js": "https://cdn.jsdelivr.net/npm/three@0.173.0/examples/jsm/postprocessing/EffectComposer.js",
+                "three/examples/jsm/postprocessing/RenderPass.js": "https://cdn.jsdelivr.net/npm/three@0.173.0/examples/jsm/postprocessing/RenderPass.js",
+                "three/examples/jsm/postprocessing/UnrealBloomPass.js": "https://cdn.jsdelivr.net/npm/three@0.173.0/examples/jsm/postprocessing/UnrealBloomPass.js",
+                "three/examples/jsm/controls/OrbitControls.js": "https://cdn.jsdelivr.net/npm/three@0.173.0/examples/jsm/controls/OrbitControls.js",
+                "three/examples/jsm/libs/stats.module.js": "https://cdn.jsdelivr.net/npm/three@0.173.0/examples/jsm/libs/stats.module.js",
+                "three/examples/jsm/effects/OutlineEffect.js": "https://cdn.jsdelivr.net/npm/three@0.173.0/examples/jsm/effects/OutlineEffect.js",
+                "three/examples/jsm/geometries/TextGeometry.js": "https://cdn.jsdelivr.net/npm/three@0.173.0/examples/jsm/geometries/TextGeometry.js",
+                "three/examples/jsm/loaders/FontLoader.js": "https://cdn.jsdelivr.net/npm/three@0.173.0/examples/jsm/loaders/FontLoader.js"
+            }
+        }
+    </script>
+    <script type="x-shader/x-vertex" id="vertexShader">
+        varying vec3 vColor;
+        varying vec2 vUv;
+        attribute float speed;
+        uniform float maxSpeed;
+        uniform float colorIntensity;
+
+        void main() {
+            vUv = uv;
+            
+            // Нормализация скорости от 0 до 1
+            float normalizedSpeed = clamp(speed / maxSpeed, 0.0, 1.0);
+            
+            // Градиент от синего (0.6) к красному (0.0)
+            vec3 coldColor = vec3(0.0, 0.0, 1.0); // Синий
+            vec3 hotColor = vec3(1.0, 0.0, 0.0); // Красный
+            vColor = mix(coldColor, hotColor, pow(normalizedSpeed, colorIntensity));
+            
+            // Позиционирование
+            vec4 mvPosition = modelViewMatrix * instanceMatrix * vec4(position, 1.0);
+            gl_Position = projectionMatrix * mvPosition;
+        }
+    </script>
+    <script type="x-shader/x-fragment" id="fragmentShader">
+        varying vec3 vColor;
+        varying vec2 vUv;
+
+        void main() {
+            // Эффект свечения
+            float glow = smoothstep(0.4, 0.6, 1.0 - length(vUv - 0.5));
+            gl_FragColor = vec4(vColor + glow * 0.5, 1.0);
+        }
+    </script>
+    <script type="module" src="./main.js"></script>
+</body>
+</html>
