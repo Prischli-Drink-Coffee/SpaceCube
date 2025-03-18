@@ -1,0 +1,13 @@
+
+
+# Парсер для ВК сообществ
+VKCollector:
+  access_token: "8b17a03b8b17a03b8b17a03bfc883e26b388b178b17a03becbba62c570b8acb15d76325"
+  api_version: "5.131"
+  domain: "zapahdney"
+  post_filter:
+    allow_empty_text: false
+    ages_task: true
+  download_images: true
+  post_number: 10
+  posts_per_request: 10
