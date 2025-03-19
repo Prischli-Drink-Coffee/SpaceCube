@@ -5,7 +5,8 @@ import json
 import os
 from typing import List, Dict
 from kafka import KafkaProducer, KafkaConsumer
-from kafka.admin import KafkaAdminClient, ConfigResource, ConfigResourceType
+from kafka.admin import KafkaAdminClient, ConfigResource, ConfigResourceType, NewTopic
+from kafka.errors import TopicAlreadyExistsError, UnknownTopicOrPartitionError
 from kafka.errors import KafkaError
 import base64
 from src.scripts.simulation_init import ParticleInitializer
@@ -56,7 +57,10 @@ def _create_kafka_producer(kafka_brokers):
             bootstrap_servers=kafka_brokers,
             value_serializer=lambda v: v,  # Оставляем как есть
             key_serializer=lambda k: k if isinstance(k, bytes) else str(k).encode('utf-8'),
-            max_request_size=52428800
+            max_request_size=52428800,
+            request_timeout_ms=30000,
+            retries=5,
+            retry_backoff_ms=1000
         )
     except Exception as e:
         log.error(f"Failed to create Kafka Producer: {e}")
@@ -71,8 +75,8 @@ class Orchestrator:
         self.running = False
         self.ws_host = get_env_value(env, 'WS_HOST', required=True)
         self.ws_port = get_env_value(env, 'WS_PORT', required=True, type_cast=int)
-        self.kafka_brokers = get_env_value(env, 'KAFKA_BROKERS', required=True, type_cast=lambda x: x.split(','))   
-        self.num_workers = len(self.kafka_brokers)
+        self.kafka_brokers = get_env_value(env, 'KAFKA_BROKERS', required=True, type_cast=lambda x: x.split(','))
+        self.num_workers = int(get_env_value(env, 'NUM_WORKERS', required=True))
         self.box_size = get_env_value(env, 'BOX_SIZE', default=100.0, type_cast=float)
         self.num_particles = get_env_value(env, 'NUM_PARTICLES', default=10000, type_cast=int)
         self.dt = get_env_value(env, 'DT', default=0.01, type_cast=float)
@@ -91,7 +95,53 @@ class Orchestrator:
         self.kafka_consumer = _create_kafka_consumer(self.kafka_brokers)
         # Инициализация продюссера
         self.kafka_producer = _create_kafka_producer(self.kafka_brokers)
+        # Пересоздаем топики
+        self.topics_config = [
+            {'name': 'kernel_updates', 'partitions': self.num_workers, 'replication_factor': 1},
+            {'name': 'simulation_control', 'partitions': self.num_workers, 'replication_factor': 1},
+            {'name': 'particle_updates', 'partitions': self.num_workers, 'replication_factor': 1},
+            {'name': 'particle_chunks', 'partitions': self.num_workers, 'replication_factor': 1},
+        ]
+        self.recreate_kafka_topics(self.kafka_brokers, self.topics_config)
+        # Логируем старт оркестратора
         log.info("Orchestrator started successfully")
+
+    def recreate_kafka_topics(self, kafka_brokers, topics_config):
+
+        try:
+            # Удаляем существующие топики, даже если они есть
+            topics_to_delete = [topic['name'] for topic in topics_config]
+            
+            if topics_to_delete:
+                try:
+                    self.admin_client.delete_topics(topics_to_delete)
+                    log.info(f"Deleted topics: {topics_to_delete}")
+                    # Ждем, пока топики будут удалены
+                    time.sleep(20)
+                except UnknownTopicOrPartitionError:
+                    log.warning("Some topics do not exist, skipping deletion.")
+                except Exception as e:
+                    log.error(f"Failed to delete topics: {e}")
+                    raise
+
+            # Создаем топики заново
+            new_topics = [
+                NewTopic(
+                    name=topic['name'],
+                    num_partitions=topic['partitions'],
+                    replication_factor=topic['replication_factor']
+                )
+                for topic in topics_config
+            ]
+            
+            self.admin_client.create_topics(new_topics=new_topics, validate_only=False)
+            log.info(f"Created topics: {[t['name'] for t in topics_config]}")
+
+        except TopicAlreadyExistsError:
+            log.warning("Some topics already exist, skipping creation.")
+        except Exception as e:
+            log.error(f"Failed to recreate Kafka topics: {e}")
+
 
     async def purge_topics(self):
         """Очистка топиков путем изменения retention.ms"""
@@ -113,7 +163,7 @@ class Orchestrator:
                 log.info(f"Set retention.ms=1000 for topic: {topic}")
 
             # Ждем, пока Kafka удалит сообщения
-            await asyncio.sleep(5)
+            await asyncio.sleep(20)
 
             # Восстанавливаем стандартное значение retention.ms
             for topic in topics_to_purge:
@@ -133,14 +183,14 @@ class Orchestrator:
     async def run(self):
         """Основной цикл выполнения"""
         try:
-            # Удаление топиков перед запуском
+            # # очистка топиков перед запуском
             await self.purge_topics()
             # Инициализация WebSocket сервера
             self.ws_server = WebSocketServer(host=self.ws_host, port=self.ws_port)
             server_task = asyncio.create_task(self.ws_server.run_server())
             log.info(f"WebSocket server state: {not server_task.done()}")
             # Даем серверу время на запуск
-            await asyncio.sleep(5)
+            await asyncio.sleep(2)
             # Инициализация симуляции
             await self.initialize_simulation()
             # Цикл оркестрации
@@ -160,7 +210,7 @@ class Orchestrator:
             # 1. Отправка ядра
             await self.send_kernel_update()
             # 2. Явная задержка для гарантии доставки
-            await asyncio.sleep(5)
+            await asyncio.sleep(10)
             # 3. Запуск симуляции
             await self.start_simulation()
         except Exception as e:
@@ -192,7 +242,7 @@ class Orchestrator:
                 'kernel_updates',
                 value=serialized_message  # Отправляем одно сообщение всем воркерам
             )
-            future.get(timeout=10)  # Ждем подтверждения доставки
+            future.get(timeout=20)  # Ждем подтверждения доставки
             
             log.info(f"Kernel update sent to all workers")
             
@@ -238,7 +288,7 @@ class Orchestrator:
 
             # Ожидаем подтверждения доставки всех сообщений
             for future in futures:
-                future.get(timeout=10)  # Таймаут 10 секунд на доставку
+                future.get(timeout=20)  # Таймаут 10 секунд на доставку
             
             # Финализируем отправку
             self.kafka_producer.flush()
@@ -255,7 +305,7 @@ class Orchestrator:
     async def distribute_particles(self, particles: List[ParticleData], step: int):
         """Рассылка частиц через отдельный топик particle_chunks"""
         futures = []
-        chunk_size = 1000
+        chunk_size = 10000
         chunks = self._chunk_particles(particles, chunk_size)
 
         for worker_id in range(self.num_workers):
@@ -279,7 +329,7 @@ class Orchestrator:
 
         # Ожидание подтверждения
         for future in futures:
-            future.get(timeout=10)
+            future.get(timeout=20)
         
         log.info(f"Sent {len(chunks)} chunks for step {step}")
 
@@ -306,7 +356,7 @@ class Orchestrator:
         start_time = time.time()
     
         while (time.time() - start_time) < timeout:
-            batch = self.kafka_consumer.poll(1000)
+            batch = self.kafka_consumer.poll(30000)
             
             for _, messages in batch.items():
                 for msg in messages:
@@ -349,7 +399,7 @@ class Orchestrator:
             if len(updates) >= self.num_workers:
                 break
                 
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(0.1)
             
         return updates
 
@@ -410,7 +460,7 @@ class Orchestrator:
                     await self.distribute_particles(self.particles, current_step)
                 
                 # 2. Ожидаем обновления с увеличенным таймаутом
-                updates = await self._collect_updates(current_step, timeout=20.0)
+                updates = await self._collect_updates(current_step, timeout=60.0)
                 
                 # 3. Проверяем полноту данных
                 if len(updates) < self.num_workers:
@@ -434,11 +484,7 @@ class Orchestrator:
                 current_step += 1
                 
         except Exception as e:
-            self.running = False
             log.error("Simulation failed", exc_info=e)
-        finally:
-            sender_task.cancel()
-            await self.shutdown()
 
     async def ws_data_sender(self):
         """Отдельная задача для асинхронной отправки данных через WebSocket"""

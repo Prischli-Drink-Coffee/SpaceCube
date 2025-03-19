@@ -77,12 +77,12 @@ __device__ void resolve_collision(float3* pos1, float3* vel1, float radius1, flo
 
 __global__ void update_particles(
     float3* positions, float3* velocities, float3* accelerations,
-    float* masses, float* radii,
+    float* masses, float* radii, int* local_flags,
     int N, float dt, float box_size) {
     
     extern __shared__ float4 shared_data[];
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= N) return;
+    if (idx >= N || local_flags[idx] == 0) return; // Пропуск нелокальных частиц
     
     // Загрузка данных текущей частицы
     float3 pos = positions[idx];
