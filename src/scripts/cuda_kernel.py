@@ -18,7 +18,13 @@ class DynamicKernelLoader:
         except Exception as e:
             raise RuntimeError(f"Kernel compilation error: {e}")
             
-    def execute(self, positions, velocities, accelerations, masses, radii, N, dt, box_size, prediction_steps=1):
+    def execute(self, positions, velocities, accelerations, masses, radii, local_flags, N, dt, box_size):
+
+        # Конвертация и выделение памяти для local_flags
+        local_flags = np.ascontiguousarray(local_flags, dtype=np.int32)
+        d_local_flags = cuda.mem_alloc(local_flags.nbytes)
+        cuda.memcpy_htod(d_local_flags, local_flags)
+
         # Конвертация в contiguous arrays
         positions = np.ascontiguousarray(positions, dtype=np.float32).reshape(-1, 3)
         velocities = np.ascontiguousarray(velocities, dtype=np.float32).reshape(-1, 3)
@@ -46,11 +52,13 @@ class DynamicKernelLoader:
         shared_mem_size = block[0] * 4 * 4  # float4 (16 bytes) * threads per block
 
         # 1. Обновление частиц
+        # Вызов кернела с новым параметром
         self.update_func(
-            d_pos, d_vel, d_acc, d_mass, d_rad,
+            d_pos, d_vel, d_acc, d_mass, d_rad, d_local_flags,
             np.int32(N), np.float32(dt), np.float32(box_size),
             block=block, grid=grid, shared=shared_mem_size
         )
+        d_local_flags.free()
         cuda.Context.synchronize()
 
         # Получение текущих данных

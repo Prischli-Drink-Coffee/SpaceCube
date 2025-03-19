@@ -46,10 +46,10 @@ def _create_kafka_consumer(kafka_brokers, worker_id):
             enable_auto_commit=False,
             auto_offset_reset='earliest',  # Чтение с начала, если смещение не задано
             api_version=(2, 8, 0),  # Указываем версию API Kafka
-            session_timeout_ms=6000,  # Таймаут сессии
-            request_timeout_ms=7000,  # Таймаут запросов (должен быть больше session_timeout_ms)
-            heartbeat_interval_ms=2000,  # Интервал heartbeat
-            fetch_max_wait_ms=100, # Уменьшаем время ожидания
+            session_timeout_ms=30000,  # Таймаут сессии
+            request_timeout_ms=35000,  # Таймаут запросов (должен быть больше session_timeout_ms)
+            heartbeat_interval_ms=10000,  # Интервал heartbeat
+            fetch_max_wait_ms=500, # Уменьшаем время ожидания
             max_poll_records=1, # Обрабатываем по одному сообщению
             max_partition_fetch_bytes=52428800,  # 50 MB
             fetch_max_bytes=52428800  # 50 MB
@@ -99,7 +99,7 @@ class ParticleWorker:
     async def _process_messages(self):
         """Обработка входящих сообщений с учетом смещений"""
         try:
-            batch = self.kafka_consumer.poll(timeout_ms=5000)
+            batch = self.kafka_consumer.poll(timeout_ms=20000)
             
             if not batch:
                 return
@@ -129,9 +129,33 @@ class ParticleWorker:
             if not message:
                 log.warning("Received empty message")
                 return
-                
+
             msg_type = message.get('type')
-            
+
+            # Фильтрация по топику и партиции
+            if topic == 'simulation_control':
+                # Сообщения из simulation_control должны быть обработаны только тем воркером, 
+                # для которого они предназначены (partition == worker_id)
+                if partition != self.worker_id:
+                    log.debug(f"Ignoring message from topic '{topic}' (partition {partition} != worker_id {self.worker_id})")
+                    return
+
+            elif topic == 'particle_chunks':
+                # Сообщения из particle_chunks должны быть обработаны только тем воркером,
+                # для которого они предназначены (worker_id в сообщении == self.worker_id)
+                if 'worker_id' in message and message['worker_id'] != self.worker_id:
+                    log.debug(f"Ignoring message from topic '{topic}' (worker_id {message['worker_id']} != {self.worker_id})")
+                    return
+
+            elif topic == 'kernel_updates':
+                # Сообщения из kernel_updates обрабатываются всеми воркерами
+                pass
+
+            else:
+                log.warning(f"Unknown topic: {topic}")
+                return
+
+            # Обработка сообщения в зависимости от типа
             if msg_type == 'kernel_update':
                 await self.handle_kernel_update(message)
             elif msg_type == 'control':
@@ -140,7 +164,7 @@ class ParticleWorker:
                 await self.handle_particle_data(message)
             else:
                 log.warning(f"Unknown message type: {msg_type}")
-                
+
         except Exception as e:
             log.error(f"Message processing failed", exc_info=e)
             # При ошибке не подтверждаем offset для повторной обработки
@@ -232,11 +256,9 @@ class ParticleWorker:
         try:
 
             data = self.processor.get_local_data()
-            if data[5] == 0:  # Проверяем N
-                return  # Пропускаем шаг если нет частиц
-
-            # Используем только локальные частицы
-            positions, velocities, accelerations, masses, radii, N = data
+            positions, velocities, accelerations, masses, radii, local_flags, N = data
+            if N == 0:
+                return
                 
             # Проверка наличия данных
             if len(positions) == 0:
@@ -248,20 +270,22 @@ class ParticleWorker:
                 accelerations=accelerations,
                 masses=masses,
                 radii=radii,
+                local_flags=local_flags,
                 N=N,
                 dt=self.simulation_params['dt'],
                 box_size=self.simulation_params['box_size']
             )
             
             updates = []
-            for i, particle_id in enumerate(self.processor.local_particles.keys()):
+            for particle_id, particle in self.processor.local_particles.items():
+                idx = self.processor.all_particles.index(particle)
                 particle_data = {
                     'id': particle_id,
-                    'position': new_pos[i].tolist(),
-                    'velocity': new_vel[i].tolist(),
-                    'acceleration': new_acc[i].tolist(),
-                    'mass': self.processor.local_particles[particle_id].mass,
-                    'radius': self.processor.local_particles[particle_id].radius
+                    'position': new_pos[idx].tolist(),
+                    'velocity': new_vel[idx].tolist(),
+                    'acceleration': new_acc[idx].tolist(),
+                    'mass': particle.mass,
+                    'radius': particle.radius
                 }
                 # Преобразуем словарь в объект ParticleData
                 updates.append(ParticleData(**particle_data))
@@ -296,7 +320,7 @@ class ParticleWorker:
                 value=json.dumps(message).encode('utf-8'),
                 partition=self.worker_id
             )
-            future.get(timeout=10)
+            future.get(timeout=20)
 
     async def shutdown(self):
         """Корректное завершение работы"""

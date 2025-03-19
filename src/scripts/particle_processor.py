@@ -13,21 +13,25 @@ log = setup_logging()
 
 class ParticleProcessor:
     def __init__(self):
-        self.all_particles = {}  # Все полученные частицы
-        self.local_particles = {}  # Частицы в границах воркера
-        
+        self.all_particles = []  # Список для сохранения порядка
+        self.local_indices = []  # Индексы локальных частиц
+        self.local_particles = {}  # Словарь локальных частиц (particle_id -> ParticleData)
+        self.current_bounds = None
+
     def load_particles(self, particles: List[ParticleData]):
-        # Сохраняем все частицы
-        self.all_particles = {p.id: p for p in particles}
-        log.info(f"Loaded {len(self.all_particles)} particles")
+        self.all_particles = particles  # Сохраняем как список
+        self.local_particles = {p.id: p for p in particles}  # Инициализируем словарь
 
     def filter_by_bounds(self, bounds):
-        prev_count = len(self.local_particles)
-        self.local_particles = {pid: p for pid, p in self.all_particles.items() 
-                            if self._is_in_bounds(p.position, bounds)}
-        log.info(f"Particles after filtering: {len(self.local_particles)} "
-                f"(Δ={len(self.local_particles) - prev_count})")
-    
+        self.current_bounds = bounds
+        self.local_indices = []
+        self.local_particles = {}  # Очищаем словарь перед фильтрацией
+
+        for idx, p in enumerate(self.all_particles):
+            if self._is_in_bounds(p.position, bounds):
+                self.local_indices.append(idx)
+                self.local_particles[p.id] = p  # Добавляем в словарь
+
     def _is_in_bounds(self, pos, bounds):
         """Улучшенная проверка границ"""
         try:
@@ -37,30 +41,21 @@ class ParticleProcessor:
                     bounds[2][0] <= z < bounds[2][1])
         except (TypeError, IndexError):
             return False
-            
+
     def get_local_data(self):
-        """Подготовка данных для локальных частиц"""
-        if not self.local_particles:
-            # Возвращаем 6 элементов: 5 пустых массивов и N=0
-            return (np.empty((0, 3), dtype=np.float32), 
-                np.empty((0, 3), dtype=np.float32),
-                np.empty((0, 3), dtype=np.float32),
-                np.empty(0, dtype=np.float32),
-                np.empty(0, dtype=np.float32),
-                0)  # Добавляем N=0
-            
+        if not self.all_particles:
+            return (np.empty((0, 3), np.empty((0, 3)), np.empty((0, 3)), 
+                    np.empty(0), np.empty(0), np.empty(0, dtype=np.int32), 0))
         try:
-            positions = np.array([p.position for p in self.local_particles.values()], dtype=np.float32)
-            velocities = np.array([p.velocity for p in self.local_particles.values()], dtype=np.float32)
-            accelerations = np.array([p.acceleration for p in self.local_particles.values()], dtype=np.float32)
-            masses = np.array([p.mass for p in self.local_particles.values()], dtype=np.float32)
-            radii = np.array([p.radius for p in self.local_particles.values()], dtype=np.float32)
-            
-            # Проверка согласованности размеров
-            assert len(positions) == len(velocities) == len(accelerations) == len(masses) == len(radii)
-            N = len(self.local_particles)
-            return positions, velocities, accelerations, masses, radii, N
-            
+            positions = np.array([p.position for p in self.all_particles], dtype=np.float32)
+            velocities = np.array([p.velocity for p in self.all_particles], dtype=np.float32)
+            accelerations = np.array([p.acceleration for p in self.all_particles], dtype=np.float32)
+            masses = np.array([p.mass for p in self.all_particles], dtype=np.float32)
+            radii = np.array([p.radius for p in self.all_particles], dtype=np.float32)
+            local_flags = np.zeros(len(self.all_particles), dtype=np.int32)
+            local_flags[self.local_indices] = 1
+            N = len(self.all_particles)
+            return (positions, velocities, accelerations, masses, radii, local_flags, N)
         except Exception as e:
             log.error(f"Data preparation failed: {e}")
             raise
